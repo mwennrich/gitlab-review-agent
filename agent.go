@@ -22,10 +22,10 @@ func main() {
 	ctx := context.Background()
 
 	// setup configuration from environment variables with defaults
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	modelName := os.Getenv("MODEL_NAME")
-	repoPath := os.Getenv("REPO_PATH")
+	baseURL := envOrFail("OPENAI_BASE_URL")
+	apiKey := envOrFail("OPENAI_API_KEY")
+	modelName := envOrFail("MODEL_NAME")
+	repoPath := envOrFail("REPO_PATH")
 	systemPrompt := os.Getenv("SYSTEM_PROMPT")
 	if systemPrompt == "" {
 		systemPrompt = fmt.Sprintf("You are an automated code review system. The repo is in %s. Use the 'filesystem' tools to inspect files in the %s directory, and the 'run_command' shell tool for read-only commands such as git, rg, ls, cat, sed, and find.", repoPath, repoPath)
@@ -42,8 +42,8 @@ func main() {
 		slog.Info("Using task from file", "file", taskFile)
 	}
 
-	if baseURL == "" || apiKey == "" || modelName == "" || taskPrompt == "" || repoPath == "" {
-		fatalf("missing required environment variables")
+	if taskPrompt == "" {
+		fatalf("no task provided: set TASK environment variable or provide a file with TASK_FILE")
 	}
 
 	maxSteps := envIntOrDefault("MAX_STEPS", 200)
@@ -344,6 +344,14 @@ func envIntOrDefault(key string, fallback int) int {
 	}
 
 	return parsed
+}
+
+func envOrFail(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		fatalf("missing required environment variable: %s", key)
+	}
+	return v
 }
 
 func fatalf(format string, args ...any) {
