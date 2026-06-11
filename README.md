@@ -53,7 +53,7 @@ The agent expects the repository to analyze under the path specified by `REPO_PA
 
 ```yaml
 review-agent:
-  image: mwennrich/mdr-agent
+  image: ghcr.io/mwennrich/gitlab-review-agent:latest
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:

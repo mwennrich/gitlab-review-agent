@@ -36,7 +36,7 @@ var allowedCommands = map[string]bool{
 
 func main() {
 	mcpServer := server.NewMCPServer(
-		"mdr-shell-tools",
+		"shell-tools",
 		"1.0.0",
 		server.WithToolCapabilities(true),
 	)
