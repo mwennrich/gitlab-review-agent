@@ -1,0 +1,6 @@
+*.env
+run.out
+/gitlab-review-agent
+AGENTS.md
+/agent
+/shellmcp
