@@ -47,6 +47,8 @@ func main() {
 	}
 
 	maxSteps := envIntOrDefault("MAX_STEPS", 200)
+	maxToolResultSize := envIntOrDefault("MAX_TOOL_RESULT_SIZE", 30000) // 30KB default
+
 
 	level := slog.LevelInfo
 	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
@@ -155,7 +157,7 @@ func main() {
 
 		toolCallsExecuted += len(msg.ToolCalls)
 		for _, tc := range msg.ToolCalls {
-			resultText := executeToolCall(ctx, tc, fsToolsRes.Tools, shellToolsRes.Tools, fsClient, shellClient)
+			resultText := executeToolCall(ctx, tc, maxToolResultSize, fsToolsRes.Tools, shellToolsRes.Tools, fsClient, shellClient)
 			slog.Debug("Tool call result", "tool", tc.Function.Name, "result", resultText)
 			messages = append(messages, openai.ToolMessage(resultText, tc.ID))
 		}
@@ -236,7 +238,7 @@ func buildOpenAITools(tools []mcp.Tool) []openai.ChatCompletionToolUnionParam {
 	return result
 }
 
-func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, fsTools []mcp.Tool, shellTools []mcp.Tool, fsClient *client.Client, shellClient *client.Client) string {
+func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, maxToolResultSize int, fsTools []mcp.Tool, shellTools []mcp.Tool, fsClient *client.Client, shellClient *client.Client) string {
 	argsJSON := tc.Function.Arguments
 	toolName := tc.Function.Name
 
@@ -279,7 +281,28 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 		return fmt.Sprintf("tool returned result, but marshal failed: %v", err)
 	}
 
-	return string(payload)
+	result := string(payload)
+	result = truncateToolResult(result, maxToolResultSize)
+
+	return result
+}
+
+func truncateToolResult(result string, maxSize int) string {
+	if len(result) <= maxSize {
+		return result
+	}
+
+	// Keep first 40% and last 40% of the result
+	keepStart := maxSize * 2 / 5
+	keepEnd := maxSize * 2 / 5
+
+	truncated := result[:keepStart] +
+		fmt.Sprintf("\n\n[... %d characters truncated ...]\n\n", len(result)-maxSize) +
+		result[len(result)-keepEnd:]
+
+	slog.Info("Tool result truncated", "original_size", len(result), "truncated_size", maxSize, "truncated_chars", len(result)-maxSize)
+
+	return truncated
 }
 
 func summarizeToolCall(toolName string, args map[string]any) string {
