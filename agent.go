@@ -121,6 +121,8 @@ func main() {
 	startedAt := time.Now()
 	stopReason := "max_steps_reached"
 	finalAnswer := ""
+	emptyResponseRetries := 0
+	maxEmptyResponseRetries := 2
 
 	// main agent loop
 	slog.Info("Starting agent loop", "max_steps", maxSteps)
@@ -145,11 +147,26 @@ func main() {
 		messages = append(messages, msg.ToParam())
 
 		if len(msg.ToolCalls) == 0 {
+			if strings.TrimSpace(msg.Content) == "" {
+				if emptyResponseRetries < maxEmptyResponseRetries {
+					slog.Warn("Received empty response, requesting retry",
+						"retry", emptyResponseRetries+1,
+						"max_retries", maxEmptyResponseRetries)
+					messages = append(messages, openai.UserMessage(
+						"Your response was empty. Please provide a detailed answer to the original task.",
+					))
+					emptyResponseRetries++
+					continue
+				} else {
+					slog.Error("Max empty response retries reached, giving up")
+					stopReason = "empty_response"
+					break
+				}
+			}
+
 			stopReason = "final_response"
 			finalAnswer = msg.Content
-			if !strings.Contains(msg.Content, "tool_call") {
-				break
-			}
+			break
 		}
 
 		prettyLogReasoning(resp)
@@ -171,6 +188,8 @@ func main() {
 		}
 	case "no_model_response":
 		slog.Info("No response received from the model")
+	case "empty_response":
+		slog.Error("Agent failed: received empty response after multiple retries")
 	default:
 		slog.Info("Reached max steps without a final answer. Increase MAX_STEPS if needed", "max_steps", maxSteps)
 	}
