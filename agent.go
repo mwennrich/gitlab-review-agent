@@ -47,7 +47,7 @@ func main() {
 	}
 
 	maxSteps := envIntOrDefault("MAX_STEPS", 200)
-	maxToolResultSize := envIntOrDefault("MAX_TOOL_RESULT_SIZE", 30000) // 30KB default
+	maxToolResultSize := envIntOrDefault("MAX_TOOL_RESULT_SIZE", 10000) // 10KB default
 
 
 	level := slog.LevelInfo
@@ -403,6 +403,11 @@ func postGitLabMRComment(ctx context.Context, comment string) error {
 
 	if gitlabURL == "" || gitlabToken == "" || projectID == "" || mrIID == "" {
 		slog.Info("GitLab MR comment posting skipped: missing required environment variables")
+		return nil
+	}
+
+	if len(comment) < 100 {
+		slog.Info("GitLab MR comment posting skipped: comment too short", "length", len(comment))
 		return nil
 	}
 
