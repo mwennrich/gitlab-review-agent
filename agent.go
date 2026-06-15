@@ -47,8 +47,7 @@ func main() {
 	}
 
 	maxSteps := envIntOrDefault("MAX_STEPS", 200)
-	maxToolResultSize := envIntOrDefault("MAX_TOOL_RESULT_SIZE", 10000) // 10KB default
-
+	maxToolResultSize := envIntOrDefault("MAX_TOOL_RESULT_SIZE", 30000) // 30KB default
 
 	level := slog.LevelInfo
 	if logLevel := os.Getenv("LOG_LEVEL"); logLevel != "" {
