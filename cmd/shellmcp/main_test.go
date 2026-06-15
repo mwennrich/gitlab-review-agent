@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestParseCommandString(t *testing.T) {
@@ -104,6 +105,117 @@ func TestParseCommandString(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetCommandTimeout(t *testing.T) {
+	// Save original value
+	originalTimeout := os.Getenv("SHELL_COMMAND_TIMEOUT")
+	defer os.Setenv("SHELL_COMMAND_TIMEOUT", originalTimeout)
+
+	tests := []struct {
+		name          string
+		envValue      string
+		expected      time.Duration
+		description   string
+	}{
+		{
+			name:        "default timeout when env not set",
+			envValue:    "",
+			expected:    30 * time.Second,
+			description: "Should return 30 seconds when SHELL_COMMAND_TIMEOUT is not set",
+		},
+		{
+			name:        "custom timeout",
+			envValue:    "60",
+			expected:    60 * time.Second,
+			description: "Should return 60 seconds when SHELL_COMMAND_TIMEOUT=60",
+		},
+		{
+			name:        "small timeout",
+			envValue:    "5",
+			expected:    5 * time.Second,
+			description: "Should return 5 seconds when SHELL_COMMAND_TIMEOUT=5",
+		},
+		{
+			name:        "invalid value - non-numeric",
+			envValue:    "invalid",
+			expected:    30 * time.Second,
+			description: "Should return default 30 seconds for invalid value",
+		},
+		{
+			name:        "invalid value - negative",
+			envValue:    "-10",
+			expected:    30 * time.Second,
+			description: "Should return default 30 seconds for negative value",
+		},
+		{
+			name:        "invalid value - zero",
+			envValue:    "0",
+			expected:    30 * time.Second,
+			description: "Should return default 30 seconds for zero value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set environment variable
+			if tt.envValue == "" {
+				os.Unsetenv("SHELL_COMMAND_TIMEOUT")
+			} else {
+				os.Setenv("SHELL_COMMAND_TIMEOUT", tt.envValue)
+			}
+
+			// Get timeout
+			got := getCommandTimeout()
+
+			// Check result
+			if got != tt.expected {
+				t.Errorf("%s: getCommandTimeout() = %v, want %v", tt.description, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTimeoutBehavior(t *testing.T) {
+	// Save original value
+	originalTimeout := os.Getenv("SHELL_COMMAND_TIMEOUT")
+	defer os.Setenv("SHELL_COMMAND_TIMEOUT", originalTimeout)
+
+	// Set a very short timeout for testing
+	os.Setenv("SHELL_COMMAND_TIMEOUT", "1")
+
+	// Create context with timeout (simulating what handleRunCommand does)
+	timeout := getCommandTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	dir, _ := os.Getwd()
+
+	// Test with a command that will timeout
+	// Using sleep with a duration longer than the timeout
+	pipeline := []command{
+		{name: "sleep", args: []string{"5"}},
+	}
+
+	start := time.Now()
+	_, err := runPipeline(ctx, dir, pipeline)
+	duration := time.Since(start)
+
+	// Command should have failed due to timeout
+	if err == nil {
+		t.Error("Expected timeout error, but command succeeded")
+	}
+
+	// Should have taken approximately 1 second (the timeout), not 5 seconds
+	// Allow some margin for execution overhead
+	if duration > 2*time.Second {
+		t.Errorf("Command took too long: %v, expected ~1s (timeout)", duration)
+	}
+
+	// Should have taken at least close to the timeout
+	if duration < 500*time.Millisecond {
+		t.Errorf("Command finished too quickly: %v, expected ~1s (timeout)", duration)
 	}
 }
 

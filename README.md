@@ -19,6 +19,7 @@ The shell server exposes a curated allowlist of read-only Linux commands, includ
 - MAX_STEPS: Maximum number of agent loop iterations (default: 12)
 - LOG_LEVEL: Logging severity (`info` or `debug`, default: `info`)
 - REPO_PATH: Path to the repository to analyze (default: `/workspace`)
+- SHELL_COMMAND_TIMEOUT: Timeout in seconds for shell commands (default: 30)
 - GITLAB_URL: GitLab server URL (e.g., <https://gitlab.com>) - optional
 - GITLAB_TOKEN: Personal Access Token with API scope - optional
 - GITLAB_PROJECT_ID: Project ID or path (e.g., "group/project" or numeric ID) - optional

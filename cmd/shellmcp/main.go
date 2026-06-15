@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -42,7 +44,7 @@ var allowedCommands = map[string]bool{
 func main() {
 	mcpServer := server.NewMCPServer(
 		"shell-tools",
-		"0.2.0",
+		"0.2.1",
 		server.WithToolCapabilities(true),
 	)
 
@@ -58,7 +60,27 @@ func main() {
 	}
 }
 
+func getCommandTimeout() time.Duration {
+	timeoutStr := os.Getenv("SHELL_COMMAND_TIMEOUT")
+	if timeoutStr == "" {
+		return 30 * time.Second // Default timeout
+	}
+
+	timeoutSeconds, err := strconv.Atoi(timeoutStr)
+	if err != nil || timeoutSeconds <= 0 {
+		log.Printf("Invalid SHELL_COMMAND_TIMEOUT value '%s', using default 30s", timeoutStr)
+		return 30 * time.Second
+	}
+
+	return time.Duration(timeoutSeconds) * time.Second
+}
+
 func handleRunCommand(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Apply timeout to context
+	timeout := getCommandTimeout()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	commandString := request.Params.Arguments["command"].(string)
 	if commandString == "" {
 		return mcp.NewToolResultError("missing required command"), nil
