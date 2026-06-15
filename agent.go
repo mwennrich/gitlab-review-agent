@@ -119,8 +119,6 @@ func main() {
 	}
 
 	startedAt := time.Now()
-	stepsExecuted := 0
-	toolCallsExecuted := 0
 	stopReason := "max_steps_reached"
 	finalAnswer := ""
 
@@ -149,12 +147,13 @@ func main() {
 		if len(msg.ToolCalls) == 0 {
 			stopReason = "final_response"
 			finalAnswer = msg.Content
-			break
+			if !strings.Contains(msg.Content, "tool_call") {
+				break
+			}
 		}
 
 		prettyLogReasoning(resp)
 
-		toolCallsExecuted += len(msg.ToolCalls)
 		for _, tc := range msg.ToolCalls {
 			resultText := executeToolCall(ctx, tc, maxToolResultSize, fsToolsRes.Tools, shellToolsRes.Tools, fsClient, shellClient)
 			slog.Debug("Tool call result", "tool", tc.Function.Name, "result", resultText)
@@ -177,7 +176,7 @@ func main() {
 	}
 
 	duration := time.Since(startedAt).Round(time.Millisecond)
-	slog.Info("Run summary", "stop_reason", stopReason, "steps_executed", stepsExecuted, "tool_calls_executed", toolCallsExecuted, "duration", duration)
+	slog.Info("Run summary", "stop_reason", stopReason, "duration", duration)
 }
 
 // Note: this is necessary because openai-go does not currently support direct access to ReasoningContent, which is needed for pretty logging of the model's thought process. Can be removed  once openai-go supports it natively.
@@ -311,16 +310,7 @@ func summarizeToolCall(toolName string, args map[string]any) string {
 		if !ok || strings.TrimSpace(command) == "" {
 			return toolName
 		}
-
-		parts := []string{strings.TrimSpace(command)}
-		if rawArgs, ok := args["args"].([]any); ok {
-			for _, rawArg := range rawArgs {
-				if arg, ok := rawArg.(string); ok {
-					parts = append(parts, strings.TrimSpace(arg))
-				}
-			}
-		}
-		return fmt.Sprintf("%s: %s", toolName, strings.Join(parts, " "))
+		return fmt.Sprintf("%s: %s", toolName, strings.TrimSpace(command))
 
 	case "read_text_file":
 		path, _ := args["path"].(string)
