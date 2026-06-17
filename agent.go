@@ -164,6 +164,15 @@ func main() {
 				}
 			}
 
+			// Check if the LLM tried to make tool calls in text format
+			if containsToolCallPatterns(msg.Content) {
+				slog.Warn("Detected tool call patterns in text response, requesting proper tool call format")
+				messages = append(messages, openai.UserMessage(
+					"I noticed you tried to make tool calls in your response text. Please use the proper tool calling API instead. Please try again.",
+				))
+				continue
+			}
+
 			stopReason = "final_response"
 			finalAnswer = msg.Content
 			break
@@ -360,6 +369,32 @@ func hasTool(tools []mcp.Tool, name string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// containsToolCallPatterns checks if the content contains patterns that suggest
+// the LLM tried to make a tool call in text format instead of using the proper tool calling API
+func containsToolCallPatterns(content string) bool {
+	content = strings.ToLower(content)
+
+	// Check for common tool call patterns
+	patterns := []string{
+		"<tool_call>",
+		"<toolcall>",
+		"<function_call>",
+		"<functioncall>",
+		"tool_call:",
+		"toolcall:",
+		"function_call:",
+		"functioncall:",
+	}
+
+	for _, pattern := range patterns {
+		if strings.Contains(content, pattern) {
+			return true
+		}
+	}
+
 	return false
 }
 
