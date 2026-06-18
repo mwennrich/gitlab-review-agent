@@ -311,11 +311,13 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 
 	// Validate fetch tool URLs before execution
 	if hasTool(fetchTools, toolName) {
-		if urlStr, ok := parsed["url"].(string); ok {
-			if !isURLAllowed(urlStr, allowedDomains) {
-				slog.Warn("Fetch URL not allowed", "url", urlStr, "allowed_domains", allowedDomains)
-				return fmt.Sprintf("fetch URL not allowed: %s (allowed domains: %s)", urlStr, strings.Join(allowedDomains, ", "))
-			}
+		urlStr, ok := parsed["url"].(string)
+		if !ok || strings.TrimSpace(urlStr) == "" {
+			return "fetch tool call rejected: missing or invalid 'url' argument"
+		}
+		if !isURLAllowed(urlStr, allowedDomains) {
+			slog.Warn("Fetch URL not allowed", "url", urlStr, "allowed_domains", allowedDomains)
+			return fmt.Sprintf("fetch URL not allowed: %s (allowed domains: %s)", urlStr, strings.Join(allowedDomains, ", "))
 		}
 	}
 

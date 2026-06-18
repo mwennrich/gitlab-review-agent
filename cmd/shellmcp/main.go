@@ -41,7 +41,7 @@ var allowedCommands = map[string]bool{
 
 type RunCommandInput struct {
 	Command string `json:"command" jsonschema:"Command to run. Can include pipes (|) to chain multiple commands."`
-	CWD     string `json:"cwd" jsonschema:"Optional working directory relative to the workspace root."`
+	CWD     string `json:"cwd" jsonschema:"Optional working directory."`
 }
 
 func main() {
