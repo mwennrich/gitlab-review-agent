@@ -38,7 +38,8 @@ docker-run: docker-build
 		-e GITLAB_PROJECT_ID="$$GITLAB_PROJECT_ID" \
 		-e GITLAB_MR_IID="$$GITLAB_MR_IID" \
 		-e REPO_PATH="/workspace1" \
-		-v "$$REPO_PATH:/workspace1:ro" \
+		-e TARGET_BRANCH="$$TARGET_BRANCH" \
+		-v "$$REPO_PATH:/workspace" \
 		-v "$(PWD)/AGENTS.md:/config/AGENTS.md:ro" \
 		$(DOCKER_REGISTRY)/$(APP_NAME):$(DOCKER_TAG)
 

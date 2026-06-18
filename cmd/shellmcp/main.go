@@ -7,13 +7,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // command represents a single command in a pipeline
@@ -41,21 +39,22 @@ var allowedCommands = map[string]bool{
 	"wc":       true,
 }
 
+type RunCommandInput struct {
+	Command string `json:"command" jsonschema:"Command to run. Can include pipes (|) to chain multiple commands."`
+	CWD     string `json:"cwd" jsonschema:"Optional working directory relative to the workspace root."`
+}
+
 func main() {
-	mcpServer := server.NewMCPServer(
-		"shell-tools",
-		"0.2.1",
-		server.WithToolCapabilities(true),
-	)
+	impl := &mcp.Implementation{Name: "shell-tools", Version: "0.2.1"}
 
-	mcpServer.AddTool(mcp.NewTool(
-		"run_command",
-		mcp.WithDescription("Run a safe read-only command in the workspace. Allowed commands are a curated allowlist of common Linux tools. Supports pipes (|) to chain commands."),
-		mcp.WithString("command", mcp.Description("Command to run. Can include pipes (|) to chain multiple commands."), mcp.Required()),
-		mcp.WithString("cwd", mcp.Description("Optional working directory relative to the workspace root."), mcp.DefaultString(".")),
-	), handleRunCommand)
+	mcpServer := mcp.NewServer(impl, nil)
 
-	if err := server.ServeStdio(mcpServer); err != nil {
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "run_command",
+		Description: "Run a safe read-only command in the workspace. Allowed commands are a curated allowlist of common Linux tools. Supports pipes (|) to chain commands.",
+	}, handleRunCommand)
+
+	if err := mcpServer.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("shell MCP server failed: %v", err)
 	}
 }
@@ -75,46 +74,41 @@ func getCommandTimeout() time.Duration {
 	return time.Duration(timeoutSeconds) * time.Second
 }
 
-func handleRunCommand(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleRunCommand(ctx context.Context, req *mcp.CallToolRequest, in RunCommandInput) (*mcp.CallToolResult, any, error) {
 	// Apply timeout to context
 	timeout := getCommandTimeout()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	commandString := request.Params.Arguments["command"].(string)
+	commandString := in.Command
 	if commandString == "" {
-		return mcp.NewToolResultError("missing required command"), nil
+		return nil, nil, fmt.Errorf("missing required command")
 	}
 
-	cwdArg := "."
-	if cwdValue, ok := request.Params.Arguments["cwd"]; ok && cwdValue != nil {
-		cwdArg = cwdValue.(string)
-	}
-
-	commandDir := os.Getenv("REPO_PATH")
-	if cwdArg != "" {
-		commandDir = filepath.Join(commandDir, cwdArg)
+	commandDir := in.CWD
+	if commandDir == "" {
+		commandDir = os.Getenv("REPO_PATH")
 	}
 
 	// Parse command string into pipeline
 	pipeline, err := parseCommandString(commandString)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse command: %v", err)), nil
+		return nil, nil, fmt.Errorf("failed to parse command: %v", err)
 	}
 
 	// Validate all commands in pipeline
 	for _, cmd := range pipeline {
 		if !allowedCommands[cmd.name] {
-			return mcp.NewToolResultError(fmt.Sprintf("command %q is not allowed", cmd.name)), nil
+			return nil, nil, fmt.Errorf("command %q is not allowed", cmd.name)
 		}
 	}
 
 	// Execute pipeline
 	output, err := runPipeline(ctx, commandDir, pipeline)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("command failed: %v\n\n%s", err, output)), nil
+		return nil, nil, fmt.Errorf("command failed: %v\n\n%s", err, output)
 	}
-	return mcp.NewToolResultText(output), nil
+	return nil, output, nil
 }
 
 func runCommand(ctx context.Context, dir string, command string, args ...string) (string, error) {
