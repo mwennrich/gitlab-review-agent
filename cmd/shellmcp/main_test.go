@@ -111,7 +111,11 @@ func TestParseCommandString(t *testing.T) {
 func TestGetCommandTimeout(t *testing.T) {
 	// Save original value
 	originalTimeout := os.Getenv("SHELL_COMMAND_TIMEOUT")
-	defer os.Setenv("SHELL_COMMAND_TIMEOUT", originalTimeout)
+	defer func() {
+		if err := os.Setenv("SHELL_COMMAND_TIMEOUT", originalTimeout); err != nil {
+			t.Logf("failed to restore SHELL_COMMAND_TIMEOUT: %v", err)
+		}
+	}()
 
 	tests := []struct {
 		name          string
@@ -161,9 +165,13 @@ func TestGetCommandTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set environment variable
 			if tt.envValue == "" {
-				os.Unsetenv("SHELL_COMMAND_TIMEOUT")
+				if err := os.Unsetenv("SHELL_COMMAND_TIMEOUT"); err != nil {
+					t.Fatalf("failed to unset SHELL_COMMAND_TIMEOUT: %v", err)
+				}
 			} else {
-				os.Setenv("SHELL_COMMAND_TIMEOUT", tt.envValue)
+				if err := os.Setenv("SHELL_COMMAND_TIMEOUT", tt.envValue); err != nil {
+					t.Fatalf("failed to set SHELL_COMMAND_TIMEOUT: %v", err)
+				}
 			}
 
 			// Get timeout
@@ -180,10 +188,16 @@ func TestGetCommandTimeout(t *testing.T) {
 func TestTimeoutBehavior(t *testing.T) {
 	// Save original value
 	originalTimeout := os.Getenv("SHELL_COMMAND_TIMEOUT")
-	defer os.Setenv("SHELL_COMMAND_TIMEOUT", originalTimeout)
+	defer func() {
+		if err := os.Setenv("SHELL_COMMAND_TIMEOUT", originalTimeout); err != nil {
+			t.Logf("failed to restore SHELL_COMMAND_TIMEOUT: %v", err)
+		}
+	}()
 
 	// Set a very short timeout for testing
-	os.Setenv("SHELL_COMMAND_TIMEOUT", "1")
+	if err := os.Setenv("SHELL_COMMAND_TIMEOUT", "1"); err != nil {
+		t.Fatalf("failed to set SHELL_COMMAND_TIMEOUT: %v", err)
+	}
 
 	// Create context with timeout (simulating what handleRunCommand does)
 	timeout := getCommandTimeout()

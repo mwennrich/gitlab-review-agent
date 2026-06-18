@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
@@ -27,9 +28,15 @@ func main() {
 	modelName := envOrFail("MODEL_NAME")
 	repoPath := envOrFail("REPO_PATH")
 	targetBranch := envStringOrDefault("TARGET_BRANCH", "main")
+	fetchAllowedDomains := envStringOrDefault("FETCH_ALLOWED_DOMAINS", "github.com,githubusercontent.com")
+	allowedDomains := strings.Split(fetchAllowedDomains, ",")
+	for i := range allowedDomains {
+		allowedDomains[i] = strings.TrimSpace(allowedDomains[i])
+	}
+
 	systemPrompt := os.Getenv("SYSTEM_PROMPT")
 	if systemPrompt == "" {
-		systemPrompt = fmt.Sprintf("You are an automated code review system. The repo is in %s. Use the 'filesystem' tools to inspect files in the %s directory, and the 'run_command' shell tool for read-only commands such as git, rg, ls, cat, sed, and find.", repoPath, repoPath)
+		systemPrompt = fmt.Sprintf("You are an automated code review system. The repo is in %s. Use the 'filesystem' tools to inspect files in the %s directory, the 'run_command' shell tool for read-only commands such as git, rg, ls, cat, sed, and find, and the 'fetch' tool to fetch content from allowed domains (%s).", repoPath, repoPath, fetchAllowedDomains)
 	}
 
 	// Read task from file if TASK_FILE is set, otherwise use TASK environment variable
@@ -66,56 +73,72 @@ func main() {
 	oai := openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL))
 
 	// setup MCP clients for the filesystem, shell servers
-	fsClient, err := client.NewStdioMCPClient("npx", []string{}, "-y", "@modelcontextprotocol/server-filesystem", repoPath)
+	impl := &mcp.Implementation{Name: "go-review-agent", Version: "1.0.0"}
+
+	slog.Info("Starting filesystem MCP client")
+	fsClient := mcp.NewClient(impl, nil)
+	fsTransport := &mcp.CommandTransport{Command: exec.Command("/app/mcp-filesystem-server", repoPath)}
+	fsSession, err := fsClient.Connect(ctx, fsTransport, nil)
 	if err != nil {
 		fatalf("failed to start filesystem client: %v", err)
 	}
 	defer func() {
-		if err := fsClient.Close(); err != nil {
-			slog.Error("failed to close filesystem client", "error", err)
+		if err := fsSession.Close(); err != nil {
+			slog.Error("failed to close filesystem session", "error", err)
 		}
 	}()
 
-	shellClient, err := newShellMCPClient()
+	slog.Info("Starting shell MCP client")
+	shellClient := mcp.NewClient(impl, nil)
+	shellTransport := &mcp.CommandTransport{Command: exec.Command("/app/shellmcp", repoPath)}
+	shellSession, err := shellClient.Connect(ctx, shellTransport, nil)
 	if err != nil {
 		fatalf("failed to start shell client: %v", err)
 	}
 	defer func() {
-		if err := shellClient.Close(); err != nil {
-			slog.Error("failed to close shell client", "error", err)
+		if err := shellSession.Close(); err != nil {
+			slog.Error("failed to close shell session", "error", err)
+		}
+	}()
+
+	slog.Info("Starting fetch MCP client")
+	fetchClient := mcp.NewClient(impl, nil)
+	fetchTransport := &mcp.CommandTransport{Command: exec.Command("/app/mcp-fetch", "server")}
+	fetchSession, err := fetchClient.Connect(ctx, fetchTransport, nil)
+	if err != nil {
+		fatalf("failed to start fetch client: %v", err)
+	}
+	defer func() {
+		if err := fetchSession.Close(); err != nil {
+			slog.Error("failed to close fetch session", "error", err)
 		}
 	}()
 
 	// initialize MCP clients and fetch tool lists
 	slog.Info("Connecting to MCP servers")
-	slog.Debug(" ... initializing filesystem client")
-	fsInit := mcp.InitializeRequest{}
-	fsInit.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	fsInit.Params.ClientInfo = mcp.Implementation{Name: "go-review-agent", Version: "1.0.0"}
-	if _, err := fsClient.Initialize(ctx, fsInit); err != nil {
-		fatalf("filesystem initialization failed: %v", err)
-	}
-	slog.Debug(" ... initializing shell client")
-	shellInit := mcp.InitializeRequest{}
-	shellInit.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	shellInit.Params.ClientInfo = mcp.Implementation{Name: "go-review-agent", Version: "1.0.0"}
-	if _, err := shellClient.Initialize(ctx, shellInit); err != nil {
-		fatalf("shell initialization failed: %v", err)
-	}
 
-	slog.Debug("Fetching tool lists from MCP servers")
-	fsToolsRes, err := fsClient.ListTools(ctx, mcp.ListToolsRequest{})
+	// Add timeout for MCP initialization to prevent hanging
+	initTimeout := 30 * time.Second
+	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
+	defer cancel()
+
+	slog.Info("Fetching tool lists from MCP servers")
+	fsToolsRes, err := fsSession.ListTools(initCtx, &mcp.ListToolsParams{})
 	if err != nil {
 		fatalf("failed to load filesystem tools: %v", err)
 	}
-	shellToolsRes, err := shellClient.ListTools(ctx, mcp.ListToolsRequest{})
+	shellToolsRes, err := shellSession.ListTools(initCtx, &mcp.ListToolsParams{})
 	if err != nil {
 		fatalf("failed to load shell tools: %v", err)
+	}
+	fetchToolsRes, err := fetchSession.ListTools(initCtx, &mcp.ListToolsParams{})
+	if err != nil {
+		fatalf("failed to load fetch tools: %v", err)
 	}
 
 	// build OpenAI tool definitions from the MCP tool lists
 	allMCPTools := append(fsToolsRes.Tools, shellToolsRes.Tools...)
-	// allMCPTools = append(allMCPTools, thinkToolsRes.Tools...)
+	allMCPTools = append(allMCPTools, fetchToolsRes.Tools...)
 	oaiTools := buildOpenAITools(allMCPTools)
 
 	messages := []openai.ChatCompletionMessageParamUnion{
@@ -186,7 +209,7 @@ func main() {
 		prettyLogReasoning(resp)
 
 		for _, tc := range msg.ToolCalls {
-			resultText := executeToolCall(ctx, tc, maxToolResultSize, fsToolsRes.Tools, shellToolsRes.Tools, fsClient, shellClient)
+			resultText := executeToolCall(ctx, tc, maxToolResultSize, fsToolsRes.Tools, shellToolsRes.Tools, fetchToolsRes.Tools, fsSession, shellSession, fetchSession, allowedDomains)
 			slog.Debug("Tool call result", "tool", tc.Function.Name, "result", resultText)
 			messages = append(messages, openai.ToolMessage(resultText, tc.ID))
 		}
@@ -242,7 +265,7 @@ func prettyLogReasoning(resp *openai.ChatCompletion) {
 	}
 }
 
-func buildOpenAITools(tools []mcp.Tool) []openai.ChatCompletionToolUnionParam {
+func buildOpenAITools(tools []*mcp.Tool) []openai.ChatCompletionToolUnionParam {
 	result := make([]openai.ChatCompletionToolUnionParam, 0, len(tools))
 
 	for _, tool := range tools {
@@ -270,7 +293,7 @@ func buildOpenAITools(tools []mcp.Tool) []openai.ChatCompletionToolUnionParam {
 	return result
 }
 
-func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, maxToolResultSize int, fsTools []mcp.Tool, shellTools []mcp.Tool, fsClient *client.Client, shellClient *client.Client) string {
+func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, maxToolResultSize int, fsTools []*mcp.Tool, shellTools []*mcp.Tool, fetchTools []*mcp.Tool, fsSession *mcp.ClientSession, shellSession *mcp.ClientSession, fetchSession *mcp.ClientSession, allowedDomains []string) string {
 	argsJSON := tc.Function.Arguments
 	toolName := tc.Function.Name
 
@@ -286,9 +309,17 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 
 	slog.Info("Run", "tool", summarizeToolCall(toolName, parsed))
 
-	req := mcp.CallToolRequest{}
-	req.Params.Name = toolName
-	req.Params.Arguments = parsed
+	// Validate fetch tool URLs before execution
+	if hasTool(fetchTools, toolName) {
+		urlStr, ok := parsed["url"].(string)
+		if !ok || strings.TrimSpace(urlStr) == "" {
+			return "fetch tool call rejected: missing or invalid 'url' argument"
+		}
+		if !isURLAllowed(urlStr, allowedDomains) {
+			slog.Warn("Fetch URL not allowed", "url", urlStr, "allowed_domains", allowedDomains)
+			return fmt.Sprintf("fetch URL not allowed: %s (allowed domains: %s)", urlStr, strings.Join(allowedDomains, ", "))
+		}
+	}
 
 	var (
 		callResult *mcp.CallToolResult
@@ -296,9 +327,20 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 	)
 
 	if hasTool(fsTools, toolName) {
-		callResult, err = fsClient.CallTool(ctx, req)
+		callResult, err = fsSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: json.RawMessage(argsJSON),
+		})
 	} else if hasTool(shellTools, toolName) {
-		callResult, err = shellClient.CallTool(ctx, req)
+		callResult, err = shellSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: json.RawMessage(argsJSON),
+		})
+	} else if hasTool(fetchTools, toolName) {
+		callResult, err = fetchSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: json.RawMessage(argsJSON),
+		})
 	} else {
 		return fmt.Sprintf("tool not found on any MCP server: %s", toolName)
 	}
@@ -317,6 +359,32 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 	result = truncateToolResult(result, maxToolResultSize)
 
 	return result
+}
+
+// isURLAllowed checks if a URL's domain is in the allowed domains list
+func isURLAllowed(urlStr string, allowedDomains []string) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+
+	host := parsedURL.Hostname()
+	if host == "" {
+		return false
+	}
+
+	for _, allowedDomain := range allowedDomains {
+		// Exact match
+		if host == allowedDomain {
+			return true
+		}
+		// Subdomain match (e.g., raw.githubusercontent.com matches githubusercontent.com)
+		if strings.HasSuffix(host, "."+allowedDomain) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func truncateToolResult(result string, maxSize int) string {
@@ -346,12 +414,12 @@ func summarizeToolCall(toolName string, args map[string]any) string {
 		}
 		return fmt.Sprintf("%s: %s", toolName, strings.TrimSpace(command))
 
-	case "read_text_file":
+	case "read_file", "tree":
 		path, _ := args["path"].(string)
 		path = strings.TrimSpace(path)
 		return fmt.Sprintf("%s: %s", toolName, path)
 
-	case "read_multiple_files":
+	case "read_multiple_files", "search_files":
 		paths, ok := args["paths"].([]any)
 		if !ok || len(paths) == 0 {
 			return toolName
@@ -363,13 +431,23 @@ func summarizeToolCall(toolName string, args map[string]any) string {
 			}
 		}
 		return fmt.Sprintf("%s: %s", toolName, strings.Join(pathList, ", "))
+	case "search_within_files":
+		substring, _ := args["substring"].(string)
+		substring = strings.TrimSpace(substring)
+		path, _ := args["path"].(string)
+		path = strings.TrimSpace(path)
+		return fmt.Sprintf("%s: search for '%s' in %s", toolName, substring, path)
 
+	case "fetch":
+		urlStr, _ := args["url"].(string)
+		urlStr = strings.TrimSpace(urlStr)
+		return fmt.Sprintf("%s: %s", toolName, urlStr)
 	default:
 		return toolName
 	}
 }
 
-func hasTool(tools []mcp.Tool, name string) bool {
+func hasTool(tools []*mcp.Tool, name string) bool {
 	for _, t := range tools {
 		if t.Name == name {
 			return true
@@ -437,18 +515,6 @@ func envOrFail(key string) string {
 func fatalf(format string, args ...any) {
 	slog.Error(fmt.Sprintf(format, args...))
 	os.Exit(1)
-}
-
-func newShellMCPClient() (*client.Client, error) {
-	command, args := shellMCPCommand()
-	return client.NewStdioMCPClient(command, []string{}, args...)
-}
-
-func shellMCPCommand() (string, []string) {
-	if _, err := os.Stat("/app/shellmcp"); err == nil {
-		return "/app/shellmcp", nil
-	}
-	return "go", []string{"run", "./cmd/shellmcp"}
 }
 
 func postGitLabMRComment(ctx context.Context, comment string) error {
