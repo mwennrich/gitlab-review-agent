@@ -82,7 +82,11 @@ func main() {
 	if err != nil {
 		fatalf("failed to start filesystem client: %v", err)
 	}
-	defer fsSession.Close()
+	defer func() {
+		if err := fsSession.Close(); err != nil {
+			slog.Error("failed to close filesystem session", "error", err)
+		}
+	}()
 
 	slog.Info("Starting shell MCP client")
 	shellClient := mcp.NewClient(impl, nil)
@@ -91,7 +95,11 @@ func main() {
 	if err != nil {
 		fatalf("failed to start shell client: %v", err)
 	}
-	defer shellSession.Close()
+	defer func() {
+		if err := shellSession.Close(); err != nil {
+			slog.Error("failed to close shell session", "error", err)
+		}
+	}()
 
 	slog.Info("Starting fetch MCP client")
 	fetchClient := mcp.NewClient(impl, nil)
@@ -100,7 +108,11 @@ func main() {
 	if err != nil {
 		fatalf("failed to start fetch client: %v", err)
 	}
-	defer fetchSession.Close()
+	defer func() {
+		if err := fetchSession.Close(); err != nil {
+			slog.Error("failed to close fetch session", "error", err)
+		}
+	}()
 
 	// initialize MCP clients and fetch tool lists
 	slog.Info("Connecting to MCP servers")
