@@ -190,6 +190,7 @@ func main() {
 	switch stopReason {
 	case "final_response":
 		slog.Info("Final model response")
+		fmt.Println("============ FINAL ANSWER ============")
 		fmt.Println(finalAnswer)
 		// Post the final answer as a comment to GitLab MR if configured
 		if err := postGitLabMRComment(ctx, finalAnswer); err != nil {
@@ -467,6 +468,22 @@ func postGitLabMRComment(ctx context.Context, comment string) error {
 	mrIIDInt, err := strconv.Atoi(mrIID)
 	if err != nil {
 		return fmt.Errorf("invalid GITLAB_MR_IID: %w", err)
+	}
+
+	// Check if the merge request is already merged
+	mr, _, err := client.MergeRequests.GetMergeRequest(
+		projectID,
+		int64(mrIIDInt),
+		nil,
+		gitlab.WithContext(ctx),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get merge request: %w", err)
+	}
+
+	if mr.MergedAt != nil {
+		slog.Info("GitLab MR comment posting skipped: MR already merged", "project", projectID, "mr_iid", mrIID)
+		return nil
 	}
 
 	// Define the marker to identify agent comments
