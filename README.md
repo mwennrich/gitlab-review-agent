@@ -15,10 +15,13 @@ The shell server exposes a curated allowlist of read-only Linux commands, includ
 - OPENAI_BASE_URL: Base URL, for example <http://localhost:8000/v1>
 - MODEL_NAME: Model name, for example gpt-4o-mini
 - TASK: The concrete assignment for the agent (user prompt)
+- TASK_FILE: Path to a file containing the task (alternative to TASK)
 - SYSTEM_PROMPT: Optional system behavior override
-- MAX_STEPS: Maximum number of agent loop iterations (default: 12)
+- MAX_STEPS: Maximum number of agent loop iterations (default: 200)
+- MAX_TOOL_RESULT_SIZE: Maximum size of tool results in bytes (default: 30000)
 - LOG_LEVEL: Logging severity (`info` or `debug`, default: `info`)
 - REPO_PATH: Path to the repository to analyze (default: `/workspace`)
+- TARGET_BRANCH: Target branch name for comparison (default: `main`)
 - SHELL_COMMAND_TIMEOUT: Timeout in seconds for shell commands (default: 30)
 - GITLAB_URL: GitLab server URL (e.g., <https://gitlab.com>) - optional
 - GITLAB_TOKEN: Personal Access Token with API scope - optional
@@ -39,6 +42,23 @@ Or put the task in a file and set the TASK_FILE environment variable:
 
 ```bash
 TASK_FILE="/config/AGENTS.md" go run ./agent.go
+```
+
+### Using Placeholders in Tasks
+
+You can use the `__TARGET_BRANCH__` placeholder in your task description, which will be automatically replaced with the value of the `TARGET_BRANCH` environment variable (default: `main`).
+
+**Example task file:**
+
+```plain
+Please review the changes in this merge request against the __TARGET_BRANCH__ branch.
+Check for any potential issues with the code quality, security, and best practices.
+```
+
+**With custom target branch:**
+
+```bash
+TARGET_BRANCH=develop TASK_FILE="/config/review-task.md" go run ./agent.go
 ```
 
 At the end of each run, the agent prints a compact run summary with:
