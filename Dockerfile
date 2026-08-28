@@ -1,5 +1,5 @@
 # --- Stage 1: Go Build
-FROM golang:1.26 AS go-builder
+FROM golang:1.27 AS go-builder
 
 WORKDIR /src
 
@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install github.com/cnosuke/mcp-fetc
 
 
 # --- Stage 2: Build agent ---
-FROM golang:1.26 AS agent-builder
+FROM golang:1.27 AS agent-builder
 WORKDIR /src
 
 COPY go.mod go.sum ./

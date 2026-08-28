@@ -270,17 +270,22 @@ func buildOpenAITools(tools []*mcp.Tool) []openai.ChatCompletionToolUnionParam {
 
 	for _, tool := range tools {
 		schema := shared.FunctionParameters{
-			"type":       tool.InputSchema.Type,
-			"properties": tool.InputSchema.Properties,
+			"type":       "object",
+			"properties": map[string]any{},
 		}
-		if len(tool.InputSchema.Required) > 0 {
-			schema["required"] = tool.InputSchema.Required
-		}
-		if tool.InputSchema.Type == "" {
-			schema["type"] = "object"
-		}
-		if tool.InputSchema.Properties == nil {
-			schema["properties"] = map[string]any{}
+
+		// In go-sdk v1.x, Tool.InputSchema is typed as `any`; when tools are
+		// listed from a client it holds the JSON-marshaled schema as map[string]any.
+		if input, ok := tool.InputSchema.(map[string]any); ok {
+			if t, ok := input["type"].(string); ok && t != "" {
+				schema["type"] = t
+			}
+			if props, ok := input["properties"]; ok && props != nil {
+				schema["properties"] = props
+			}
+			if req, ok := input["required"].([]any); ok && len(req) > 0 {
+				schema["required"] = req
+			}
 		}
 
 		result = append(result, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
