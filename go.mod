@@ -3,7 +3,7 @@ module github.com/mwennrich/gitlab-review-agent
 go 1.26.0
 
 require (
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/openai/openai-go/v3 v3.61.0
 	gitlab.com/gitlab-org/api/client-go/v3 v3.10.0
 )
