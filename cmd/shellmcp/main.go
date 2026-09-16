@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -16,15 +17,19 @@ import (
 
 // command represents a single command in a pipeline
 type command struct {
-	name string
-	args []string
+	name           string
+	args           []string
+	suppressStderr bool
 }
+
+const suppressStderrToken = "2>/dev/null"
 
 var allowedCommands = map[string]bool{
 	"awk":      true,
 	"basename": true,
 	"cat":      true,
 	"dirname":  true,
+	"echo":     true,
 	"find":     true,
 	"git":      true,
 	"grep":     true,
@@ -40,7 +45,7 @@ var allowedCommands = map[string]bool{
 }
 
 type RunCommandInput struct {
-	Command string `json:"command" jsonschema:"Command to run. Can include pipes (|) to chain multiple commands."`
+	Command string `json:"command" jsonschema:"Command to run. Supports only pipelines using |. Does not support shell control operators such as ;, &&, ||, command substitution, or general redirection. Special case supported: token 2>/dev/null to suppress stderr for that command."`
 	CWD     string `json:"cwd" jsonschema:"Optional working directory."`
 }
 
@@ -51,7 +56,7 @@ func main() {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "run_command",
-		Description: "Run a safe read-only command in the workspace. Allowed commands are a curated allowlist of common Linux tools. Supports pipes (|) to chain commands.",
+		Description: "Run a safe read-only command in the workspace. Allowed commands are from a curated allowlist of common Linux tools. Supports only pipelines using |. Does not support shell control operators like ;, &&, ||, command substitution, or general redirection. Special case supported: token 2>/dev/null to suppress stderr for that command.",
 	}, handleRunCommand)
 
 	if err := mcpServer.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
@@ -111,21 +116,33 @@ func handleRunCommand(ctx context.Context, req *mcp.CallToolRequest, in RunComma
 	return nil, output, nil
 }
 
-func runCommand(ctx context.Context, dir string, command string, args ...string) (string, error) {
-	if command == "git" {
+func runCommand(ctx context.Context, dir string, c command) (string, error) {
+	args := c.args
+	if c.name == "git" {
 		args = append([]string{"-c", "safe.directory=" + os.Getenv("REPO_PATH")}, args...)
 	}
 
-	cmd := exec.CommandContext(ctx, command, args...)
+	cmd := exec.CommandContext(ctx, c.name, args...)
 	cmd.Dir = dir
+
+	if c.suppressStderr {
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = io.Discard
+		err := cmd.Run()
+		return strings.TrimSpace(stdout.String()), err
+	}
+
 	output, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(output)), err
 }
 
 // parseCommandString parses a command string into a pipeline of commands
 func parseCommandString(cmdString string) ([]command, error) {
-	// Split by pipe character
-	parts := strings.Split(cmdString, "|")
+	parts, err := splitPipelineParts(cmdString)
+	if err != nil {
+		return nil, err
+	}
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty command")
 	}
@@ -147,14 +164,75 @@ func parseCommandString(cmdString string) ([]command, error) {
 			return nil, fmt.Errorf("invalid command format")
 		}
 
+		args, suppressStderr := normalizeSpecialArgs(fields[1:])
+
 		cmd := command{
-			name: fields[0],
-			args: fields[1:],
+			name:           fields[0],
+			args:           args,
+			suppressStderr: suppressStderr,
 		}
 		pipeline = append(pipeline, cmd)
 	}
 
 	return pipeline, nil
+}
+
+// normalizeSpecialArgs handles explicit parser-level special cases without enabling full shell semantics.
+func normalizeSpecialArgs(args []string) ([]string, bool) {
+	normalized := make([]string, 0, len(args))
+	suppressStderr := false
+
+	for _, arg := range args {
+		if arg == suppressStderrToken {
+			suppressStderr = true
+			continue
+		}
+		normalized = append(normalized, arg)
+	}
+
+	return normalized, suppressStderr
+}
+
+// splitPipelineParts splits a command string at unquoted, unescaped pipe characters.
+func splitPipelineParts(cmdString string) ([]string, error) {
+	var parts []string
+	var currentPart strings.Builder
+	var inSingleQuote, inDoubleQuote bool
+	var escapeNext bool
+
+	for i := 0; i < len(cmdString); i++ {
+		char := cmdString[i]
+
+		switch {
+		case escapeNext:
+			currentPart.WriteByte(char)
+			escapeNext = false
+		case char == '\\' && !inSingleQuote && !inDoubleQuote:
+			currentPart.WriteByte(char)
+			escapeNext = true
+		case char == '\'' && !inDoubleQuote:
+			inSingleQuote = !inSingleQuote
+			currentPart.WriteByte(char)
+		case char == '"' && !inSingleQuote:
+			inDoubleQuote = !inDoubleQuote
+			currentPart.WriteByte(char)
+		case char == '|' && !inSingleQuote && !inDoubleQuote:
+			parts = append(parts, currentPart.String())
+			currentPart.Reset()
+		default:
+			currentPart.WriteByte(char)
+		}
+	}
+
+	if inSingleQuote || inDoubleQuote {
+		return nil, fmt.Errorf("unclosed quote in command")
+	}
+	if escapeNext {
+		return nil, fmt.Errorf("incomplete escape sequence at end of command")
+	}
+
+	parts = append(parts, currentPart.String())
+	return parts, nil
 }
 
 // parseFields splits a string into fields, respecting single and double quotes and backslash escaping
@@ -213,17 +291,21 @@ func runPipeline(ctx context.Context, dir string, pipeline []command) (string, e
 
 	// Single command - use simple execution
 	if len(pipeline) == 1 {
-		return runCommand(ctx, dir, pipeline[0].name, pipeline[0].args...)
+		return runCommand(ctx, dir, pipeline[0])
 	}
 
 	// Create commands
 	cmds := make([]*exec.Cmd, len(pipeline))
-	for i, cmd := range pipeline {
-		if cmd.name == "git" {
-			cmd.args = append([]string{"-c", "safe.directory=" + os.Getenv("REPO_PATH")}, cmd.args...)
+	for i, c := range pipeline {
+		args := c.args
+		if c.name == "git" {
+			args = append([]string{"-c", "safe.directory=" + os.Getenv("REPO_PATH")}, args...)
 		}
-		cmds[i] = exec.CommandContext(ctx, cmd.name, cmd.args...)
+		cmds[i] = exec.CommandContext(ctx, c.name, args...)
 		cmds[i].Dir = dir
+		if c.suppressStderr {
+			cmds[i].Stderr = io.Discard
+		}
 	}
 
 	// Create pipes between commands
@@ -237,8 +319,12 @@ func runPipeline(ctx context.Context, dir string, pipeline []command) (string, e
 
 	// Capture output from last command
 	var output bytes.Buffer
-	cmds[len(cmds)-1].Stdout = &output
-	cmds[len(cmds)-1].Stderr = &output
+	lastCmd := cmds[len(cmds)-1]
+	lastPipelineCmd := pipeline[len(pipeline)-1]
+	lastCmd.Stdout = &output
+	if !lastPipelineCmd.suppressStderr {
+		lastCmd.Stderr = &output
+	}
 
 	// Start all commands
 	for i, cmd := range cmds {

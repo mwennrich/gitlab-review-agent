@@ -81,6 +81,33 @@ func TestParseCommandString(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:  "pipeline with pipe inside double quotes",
+			input: "git show f55628565 | grep -E \"id:|name:\" | head -40",
+			want: []command{
+				{name: "git", args: []string{"show", "f55628565"}},
+				{name: "grep", args: []string{"-E", "id:|name:"}},
+				{name: "head", args: []string{"-40"}},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "single command with escaped pipe",
+			input: "echo foo\\|bar",
+			want: []command{
+				{name: "echo", args: []string{"foo|bar"}},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "command with stderr suppression token",
+			input: "grep -rn room_id partition/roles/ 2>/dev/null | head",
+			want: []command{
+				{name: "grep", args: []string{"-rn", "room_id", "partition/roles/"}, suppressStderr: true},
+				{name: "head", args: []string{}},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -99,8 +126,17 @@ func TestParseCommandString(t *testing.T) {
 					if got[i].name != tt.want[i].name {
 						t.Errorf("parseCommandString() command %d name = %v, want %v", i, got[i].name, tt.want[i].name)
 					}
+					if got[i].suppressStderr != tt.want[i].suppressStderr {
+						t.Errorf("parseCommandString() command %d suppressStderr = %v, want %v", i, got[i].suppressStderr, tt.want[i].suppressStderr)
+					}
 					if len(got[i].args) != len(tt.want[i].args) {
 						t.Errorf("parseCommandString() command %d args length = %v, want %v", i, len(got[i].args), len(tt.want[i].args))
+						continue
+					}
+					for j := range got[i].args {
+						if got[i].args[j] != tt.want[i].args[j] {
+							t.Errorf("parseCommandString() command %d arg %d = %v, want %v", i, j, got[i].args[j], tt.want[i].args[j])
+						}
 					}
 				}
 			}
@@ -118,10 +154,10 @@ func TestGetCommandTimeout(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name          string
-		envValue      string
-		expected      time.Duration
-		description   string
+		name        string
+		envValue    string
+		expected    time.Duration
+		description string
 	}{
 		{
 			name:        "default timeout when env not set",
@@ -238,9 +274,9 @@ func TestRunPipeline(t *testing.T) {
 	dir, _ := os.Getwd()
 
 	tests := []struct {
-		name    string
+		name     string
 		pipeline []command
-		wantErr bool
+		wantErr  bool
 	}{
 		{
 			name: "single command",

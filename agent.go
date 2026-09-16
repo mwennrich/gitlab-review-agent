@@ -301,6 +301,7 @@ func buildOpenAITools(tools []*mcp.Tool) []openai.ChatCompletionToolUnionParam {
 func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCallUnion, maxToolResultSize int, fsTools []*mcp.Tool, shellTools []*mcp.Tool, fetchTools []*mcp.Tool, fsSession *mcp.ClientSession, shellSession *mcp.ClientSession, fetchSession *mcp.ClientSession, allowedDomains []string) string {
 	argsJSON := tc.Function.Arguments
 	toolName := tc.Function.Name
+	startedAt := time.Now()
 
 	var parsed map[string]any
 	if argsJSON != "" {
@@ -312,7 +313,8 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 		parsed = map[string]any{}
 	}
 
-	slog.Info("Run", "tool", summarizeToolCall(toolName, parsed))
+	toolSummary := summarizeToolCall(toolName, parsed)
+	slog.Info("Run", "tool", toolSummary, "tool_name", toolName, "tool_call_id", tc.ID)
 
 	// Validate fetch tool URLs before execution
 	if hasTool(fetchTools, toolName) {
@@ -351,8 +353,14 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 	}
 
 	if err != nil {
-		slog.Error("Tool execution failed", "tool", toolName, "error", err)
+		slog.Error("Tool execution failed", "tool", toolName, "tool_call_id", tc.ID, "duration", time.Since(startedAt).Round(time.Millisecond), "error", err)
 		return fmt.Sprintf("tool execution failed: %v", err)
+	}
+
+	if callResult != nil && callResult.IsError {
+		slog.Error("Tool returned error result", "tool", toolName, "tool_call_id", tc.ID, "duration", time.Since(startedAt).Round(time.Millisecond), "result_preview", summarizeCallToolResult(callResult, 300))
+	} else {
+		slog.Info("Tool execution succeeded", "tool", toolName, "tool_call_id", tc.ID, "duration", time.Since(startedAt).Round(time.Millisecond))
 	}
 
 	payload, err := json.MarshalIndent(callResult, "", "  ")
@@ -364,6 +372,28 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 	result = truncateToolResult(result, maxToolResultSize)
 
 	return result
+}
+
+func summarizeCallToolResult(res *mcp.CallToolResult, maxLen int) string {
+	if res == nil {
+		return ""
+	}
+
+	payload, err := json.Marshal(res)
+	if err != nil {
+		return ""
+	}
+
+	s := strings.TrimSpace(string(payload))
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
+	}
+
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+
+	return s[:maxLen-3] + "..."
 }
 
 // isURLAllowed checks if a URL's domain is in the allowed domains list
