@@ -4,11 +4,12 @@ go 1.26.0
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/openai/openai-go/v3 v3.61.0
+	github.com/openai/openai-go/v3 v3.62.0
 	gitlab.com/gitlab-org/api/client-go/v3 v3.12.0
 )
 
 require (
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
