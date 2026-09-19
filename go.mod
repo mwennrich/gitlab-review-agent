@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/openai/openai-go/v3 v3.62.0
+	github.com/openai/openai-go/v3 v3.63.1
 	gitlab.com/gitlab-org/api/client-go/v3 v3.12.0
 )
 
