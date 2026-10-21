@@ -19,6 +19,20 @@ import (
 	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
 )
 
+const (
+	// agentCommentMarker identifies comments written by this agent, so previous
+	// agent reviews can be recognized in the merge request history.
+	agentCommentMarker = "<!-- AGENT_COMMENT -->"
+
+	// mrHistoryNoteMaxChars limits the size of a single comment injected as
+	// part of the merge request history.
+	mrHistoryNoteMaxChars = 15000
+
+	// mrHistoryNotesPerPage is the number of comments fetched with a single
+	// request when building the merge request history.
+	mrHistoryNotesPerPage = 100
+)
+
 func main() {
 	ctx := context.Background()
 
@@ -57,6 +71,12 @@ func main() {
 	// Replace __TARGET_BRANCH__ placeholder with actual target branch value
 	taskPrompt = strings.ReplaceAll(taskPrompt, "__TARGET_BRANCH__", targetBranch)
 	slog.Info("Using target branch", "branch", targetBranch)
+
+	// Append the existing merge request history (description and previous
+	// comments) so the agent can take earlier reviews into account.
+	if mrHistory := loadMergeRequestHistory(ctx); mrHistory != "" {
+		taskPrompt = fmt.Sprintf("%s\n\n---\n\n%s", taskPrompt, mrHistory)
+	}
 
 	maxSteps := envIntOrDefault("MAX_STEPS", 200)
 	maxToolResultSize := envIntOrDefault("MAX_TOOL_RESULT_SIZE", 30000) // 30KB default
@@ -374,6 +394,198 @@ func executeToolCall(ctx context.Context, tc openai.ChatCompletionMessageToolCal
 	return result
 }
 
+// mrHistoryEntry is a single pre-rendered comment of the merge request history.
+type mrHistoryEntry struct {
+	meta     string // author, timestamp and status flags
+	position string // optional "<path>:<line>" for comments on changed lines
+	body     string
+}
+
+// render formats the entry. The comment number is added here because it is not
+// counted towards the size limit.
+func (e mrHistoryEntry) render(commentNumber int) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "### Comment %d — %s\n", commentNumber, e.meta)
+	if e.position != "" {
+		fmt.Fprintf(&b, "%s\n", e.position)
+	}
+	fmt.Fprintf(&b, "%s\n\n", e.body)
+
+	return b.String()
+}
+
+// size estimates the rendered size of the entry.
+func (e mrHistoryEntry) size() int {
+	const markdownOverhead = 32 // headings, newlines and the comment counter
+	return len(e.meta) + len(e.position) + len(e.body) + markdownOverhead
+}
+
+// formatMergeRequestHistory renders the merge request context and the previous
+// comments as a markdown block that is appended to the task prompt. The notes
+// are expected to be ordered newest first, the output is chronological.
+func formatMergeRequestHistory(mr *gitlab.MergeRequest, notes []*gitlab.Note, maxChars int, includeSystemNotes bool) string {
+	var b strings.Builder
+
+	if mr != nil {
+		b.WriteString("## Merge request context\n\n")
+		fmt.Fprintf(&b, "- Title: %s\n", strings.TrimSpace(mr.Title))
+		fmt.Fprintf(&b, "- State: %s\n", mr.State)
+		fmt.Fprintf(&b, "- Source branch: %s\n", mr.SourceBranch)
+		fmt.Fprintf(&b, "- Target branch: %s\n", mr.TargetBranch)
+		if mr.Author != nil && mr.Author.Username != "" {
+			fmt.Fprintf(&b, "- Author: @%s\n", mr.Author.Username)
+		}
+		if mr.WebURL != "" {
+			fmt.Fprintf(&b, "- URL: %s\n", mr.WebURL)
+		}
+		if description := strings.TrimSpace(mr.Description); description != "" {
+			fmt.Fprintf(&b, "\n### Description\n\n%s\n", description)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## Previous comments (chronological)\n\n")
+
+	entries := collectMergeRequestHistoryEntries(notes, includeSystemNotes)
+
+	selected := make([]mrHistoryEntry, 0, len(entries))
+	omitted := 0
+	remaining := maxChars
+	for i, entry := range entries {
+		if entry.size() > remaining {
+			// The newest comment is always kept, truncated if it is too large.
+			if len(selected) == 0 {
+				entry.body = truncateHistoryText(entry.body, max(remaining-len(entry.meta)-len(entry.position), 200))
+				selected = append(selected, entry)
+				omitted = len(entries) - i - 1
+			} else {
+				omitted = len(entries) - i
+			}
+			break
+		}
+		selected = append(selected, entry)
+		remaining -= entry.size()
+	}
+
+	if len(selected) == 0 {
+		b.WriteString("(no previous comments)\n")
+		return b.String()
+	}
+
+	if omitted > 0 {
+		fmt.Fprintf(&b, "[... %d older comment(s) omitted, MR_HISTORY_MAX_CHARS=%d ...]\n\n", omitted, maxChars)
+	}
+
+	// The entries are stored newest first, print them chronologically.
+	for i := len(selected) - 1; i >= 0; i-- {
+		b.WriteString(selected[i].render(len(selected) - i))
+	}
+
+	return b.String()
+}
+
+// collectMergeRequestHistoryEntries filters and normalizes the comments. The
+// notes are expected to be ordered newest first.
+func collectMergeRequestHistoryEntries(notes []*gitlab.Note, includeSystemNotes bool) []mrHistoryEntry {
+	entries := make([]mrHistoryEntry, 0, len(notes))
+
+	for _, note := range notes {
+		if note == nil || (note.System && !includeSystemNotes) {
+			continue
+		}
+
+		// The marker is not part of the review itself.
+		body := strings.TrimSpace(strings.ReplaceAll(note.Body, agentCommentMarker, ""))
+		if body == "" {
+			continue
+		}
+
+		entries = append(entries, mrHistoryEntry{
+			meta:     formatNoteMeta(note),
+			position: formatNotePosition(note),
+			body:     truncateHistoryText(body, mrHistoryNoteMaxChars),
+		})
+	}
+
+	return entries
+}
+
+// formatNoteMeta summarizes author, timestamp and status flags of a comment.
+func formatNoteMeta(note *gitlab.Note) string {
+	author := "unknown author"
+	if note.Author.Username != "" {
+		author = "@" + note.Author.Username
+	}
+
+	flags := make([]string, 0, 4)
+	if note.System {
+		flags = append(flags, "system")
+	}
+	if note.Resolvable {
+		if note.Resolved {
+			flags = append(flags, "resolved")
+		} else {
+			flags = append(flags, "unresolved")
+		}
+	}
+	if note.Internal {
+		flags = append(flags, "internal")
+	}
+	if strings.Contains(note.Body, agentCommentMarker) {
+		flags = append(flags, "previous agent review, will be replaced by the new review")
+	}
+
+	meta := author
+	if note.CreatedAt != nil {
+		meta += " " + note.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	if len(flags) > 0 {
+		meta += " (" + strings.Join(flags, ", ") + ")"
+	}
+
+	return meta
+}
+
+// formatNotePosition returns the file and line of a comment on a changed line.
+func formatNotePosition(note *gitlab.Note) string {
+	if note.Position == nil {
+		return ""
+	}
+
+	path := note.Position.NewPath
+	line := note.Position.NewLine
+	if path == "" {
+		path = note.Position.OldPath
+		line = note.Position.OldLine
+	}
+
+	switch {
+	case path != "" && line > 0:
+		return fmt.Sprintf("`%s:%d`", path, line)
+	case path != "":
+		return fmt.Sprintf("`%s`", path)
+	default:
+		return ""
+	}
+}
+
+// truncateHistoryText shortens a single comment for the injected history. In
+// contrast to truncateToolResult the beginning of the text is kept, because the
+// important part of a review comment is usually at the top.
+func truncateHistoryText(text string, maxSize int) string {
+	if len(text) <= maxSize {
+		return text
+	}
+
+	const notice = " [... truncated ...]"
+	if maxSize <= len(notice) {
+		return text[:maxSize]
+	}
+
+	return strings.TrimSpace(text[:maxSize-len(notice)]) + notice
+}
+
 func summarizeCallToolResult(res *mcp.CallToolResult, maxLen int) string {
 	if res == nil {
 		return ""
@@ -539,6 +751,21 @@ func envStringOrDefault(key string, fallback string) string {
 	return v
 }
 
+func envBoolOrDefault(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		slog.Warn("Invalid boolean value, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+
+	return parsed
+}
+
 func envOrFail(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -552,15 +779,116 @@ func fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-func postGitLabMRComment(ctx context.Context, comment string) error {
-	// Check if GitLab configuration is present
-	gitlabURL := os.Getenv("GITLAB_URL")
-	gitlabToken := os.Getenv("GITLAB_TOKEN")
-	projectID := os.Getenv("GITLAB_PROJECT_ID")
-	mrIID := os.Getenv("GITLAB_MR_IID")
+// gitlabEnvConfig holds the GitLab connection details read from the environment.
+type gitlabEnvConfig struct {
+	url       string
+	token     string
+	projectID string
+	mrIID     int64
+}
 
-	if gitlabURL == "" || gitlabToken == "" || projectID == "" || mrIID == "" {
-		slog.Info("GitLab MR comment posting skipped: missing required environment variables")
+// gitlabEnvFromEnv reads the GitLab configuration from the environment. It
+// returns ok=false when any of the required variables is missing or invalid,
+// because the GitLab integration is optional.
+func gitlabEnvFromEnv() (gitlabEnvConfig, bool) {
+	cfg := gitlabEnvConfig{
+		url:       os.Getenv("GITLAB_URL"),
+		token:     os.Getenv("GITLAB_TOKEN"),
+		projectID: os.Getenv("GITLAB_PROJECT_ID"),
+	}
+
+	mrIID := os.Getenv("GITLAB_MR_IID")
+	if cfg.url == "" || cfg.token == "" || cfg.projectID == "" || mrIID == "" {
+		return cfg, false
+	}
+
+	parsed, err := strconv.ParseInt(mrIID, 10, 64)
+	if err != nil {
+		slog.Warn("Ignoring invalid GITLAB_MR_IID", "value", mrIID, "error", err)
+		return cfg, false
+	}
+	cfg.mrIID = parsed
+
+	return cfg, true
+}
+
+// newClient returns an authenticated GitLab API client.
+func (c gitlabEnvConfig) newClient() (*gitlab.Client, error) {
+	return gitlab.NewClient(c.token, gitlab.WithBaseURL(c.url))
+}
+
+// loadMergeRequestHistory fetches the existing merge request metadata and
+// comments so the agent can take previous reviews into account. It never aborts
+// the run: when the history is disabled or unavailable an empty string is
+// returned.
+func loadMergeRequestHistory(ctx context.Context) string {
+	if !envBoolOrDefault("INCLUDE_MR_HISTORY", true) {
+		slog.Info("Merge request history injection disabled")
+		return ""
+	}
+
+	cfg, ok := gitlabEnvFromEnv()
+	if !ok {
+		slog.Info("Merge request history injection skipped: missing or invalid GitLab environment variables")
+		return ""
+	}
+
+	maxChars := envIntOrDefault("MR_HISTORY_MAX_CHARS", 20000)
+	includeSystemNotes := envBoolOrDefault("MR_HISTORY_INCLUDE_SYSTEM_NOTES", false)
+
+	history, err := fetchMergeRequestHistory(ctx, cfg, maxChars, includeSystemNotes)
+	if err != nil {
+		slog.Warn("Failed to fetch merge request history, continuing without it", "error", err)
+		return ""
+	}
+
+	slog.Info("Injected merge request history",
+		"project", cfg.projectID,
+		"mr_iid", cfg.mrIID,
+		"chars", len(history),
+	)
+
+	return history
+}
+
+// fetchMergeRequestHistory collects the merge request metadata and the previous
+// comments. The comments are requested newest first so the size limit drops the
+// oldest comments first. Pagination is not used on purpose: merge request
+// histories are expected to be short.
+func fetchMergeRequestHistory(ctx context.Context, cfg gitlabEnvConfig, maxChars int, includeSystemNotes bool) (string, error) {
+	client, err := cfg.newClient()
+	if err != nil {
+		return "", fmt.Errorf("failed to create GitLab client: %w", err)
+	}
+
+	// The metadata is best effort: the comments alone are still useful.
+	mr, _, err := client.MergeRequests.GetMergeRequest(cfg.projectID, cfg.mrIID, nil, gitlab.WithContext(ctx))
+	if err != nil {
+		slog.Warn("Failed to fetch merge request metadata", "error", err)
+		mr = nil
+	}
+
+	orderBy := "created_at"
+	sortOrder := "desc"
+	notes, _, err := client.Notes.ListMergeRequestNotes(cfg.projectID, cfg.mrIID, &gitlab.ListMergeRequestNotesOptions{
+		ListOptions: gitlab.ListOptions{
+			PerPage: mrHistoryNotesPerPage,
+			Page:    1,
+		},
+		OrderBy: &orderBy,
+		Sort:    &sortOrder,
+	}, gitlab.WithContext(ctx))
+	if err != nil {
+		return "", fmt.Errorf("failed to list merge request notes: %w", err)
+	}
+
+	return formatMergeRequestHistory(mr, notes, maxChars, includeSystemNotes), nil
+}
+
+func postGitLabMRComment(ctx context.Context, comment string) error {
+	cfg, ok := gitlabEnvFromEnv()
+	if !ok {
+		slog.Info("GitLab MR comment posting skipped: missing or invalid GitLab environment variables")
 		return nil
 	}
 
@@ -569,25 +897,17 @@ func postGitLabMRComment(ctx context.Context, comment string) error {
 		return nil
 	}
 
-	slog.Info("Posting comment to GitLab MR", "project", projectID, "mr_iid", mrIID)
+	slog.Info("Posting comment to GitLab MR", "project", cfg.projectID, "mr_iid", cfg.mrIID)
 
-	client, err := gitlab.NewClient(
-		gitlabToken,
-		gitlab.WithBaseURL(gitlabURL),
-	)
+	client, err := cfg.newClient()
 	if err != nil {
 		return fmt.Errorf("failed to create GitLab client: %w", err)
 	}
 
-	mrIIDInt, err := strconv.Atoi(mrIID)
-	if err != nil {
-		return fmt.Errorf("invalid GITLAB_MR_IID: %w", err)
-	}
-
 	// Check if the merge request is already merged
 	mr, _, err := client.MergeRequests.GetMergeRequest(
-		projectID,
-		int64(mrIIDInt),
+		cfg.projectID,
+		cfg.mrIID,
 		nil,
 		gitlab.WithContext(ctx),
 	)
@@ -596,17 +916,14 @@ func postGitLabMRComment(ctx context.Context, comment string) error {
 	}
 
 	if mr.MergedAt != nil {
-		slog.Info("GitLab MR comment posting skipped: MR already merged", "project", projectID, "mr_iid", mrIID)
+		slog.Info("GitLab MR comment posting skipped: MR already merged", "project", cfg.projectID, "mr_iid", cfg.mrIID)
 		return nil
 	}
 
-	// Define the marker to identify agent comments
-	const agentCommentMarker = "<!-- AGENT_COMMENT -->"
-
 	// List all merge request notes to find existing agent comment
 	notes, _, err := client.Notes.ListMergeRequestNotes(
-		projectID,
-		int64(mrIIDInt),
+		cfg.projectID,
+		cfg.mrIID,
 		&gitlab.ListMergeRequestNotesOptions{},
 		gitlab.WithContext(ctx),
 	)
@@ -630,8 +947,8 @@ func postGitLabMRComment(ctx context.Context, comment string) error {
 	if existingNoteID > 0 {
 		// Update existing comment
 		_, _, err := client.Notes.UpdateMergeRequestNote(
-			projectID,
-			int64(mrIIDInt),
+			cfg.projectID,
+			cfg.mrIID,
 			existingNoteID,
 			&gitlab.UpdateMergeRequestNoteOptions{
 				Body: new(commentBody),
@@ -645,8 +962,8 @@ func postGitLabMRComment(ctx context.Context, comment string) error {
 	} else {
 		// Create new comment
 		note, _, err := client.Notes.CreateMergeRequestNote(
-			projectID,
-			int64(mrIIDInt),
+			cfg.projectID,
+			cfg.mrIID,
 			&gitlab.CreateMergeRequestNoteOptions{
 				Body: new(commentBody),
 			},

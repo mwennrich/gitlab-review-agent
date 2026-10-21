@@ -27,8 +27,29 @@ The shell server exposes a curated allowlist of read-only Linux commands, includ
 - GITLAB_TOKEN: Personal Access Token with API scope - optional
 - GITLAB_PROJECT_ID: Project ID or path (e.g., "group/project" or numeric ID) - optional
 - GITLAB_MR_IID: Merge Request IID (internal ID, not the global ID) - optional
+- INCLUDE_MR_HISTORY: Append the existing merge request description and comments to the task prompt (default: `true`, requires all GitLab variables)
+- MR_HISTORY_MAX_CHARS: Maximum size of the injected merge request history in characters (default: `20000`)
+- MR_HISTORY_INCLUDE_SYSTEM_NOTES: Also inject GitLab system notes such as label changes (default: `false`)
 
 When all GitLab environment variables are set, the agent will automatically post the final review result as a comment to the specified merge request.
+
+## Merge Request History
+
+Before the review starts, the agent loads the merge request metadata and its previous comments and appends them to the end of the task prompt:
+
+- the merge request title, state, source/target branch, author, URL and description
+- all comments in chronological order with author, timestamp, resolved status and - for comments on changed lines - the file and line
+
+The comments are fetched newest first and the oldest ones are dropped once `MR_HISTORY_MAX_CHARS` is exceeded, so the most recent review feedback is always available.
+GitLab's own comments written by the agent (marked with `<!-- AGENT_COMMENT -->`) are included as well, because they are replaced by the new review at the end of the run. This makes the agent aware of what it already reviewed in a previous run.
+
+The history is purely additive: when the GitLab variables are missing or the API request fails, the agent logs a warning and continues with the task prompt only.
+
+To disable this behavior:
+
+```bash
+INCLUDE_MR_HISTORY=false TASK_FILE="/config/AGENTS.md" go run ./agent.go
+```
 
 ## How To Give The Agent A Task
 
