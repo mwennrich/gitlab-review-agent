@@ -29,6 +29,8 @@ github.com/modelcontextprotocol/go-sdk v1.8.0 h1:KIvahhYqwtbeniWVPs3TcXEA7b8jEtw
 github.com/modelcontextprotocol/go-sdk v1.8.0/go.mod h1:dL7u98E/zjJTGzEq+j30jQ8K2k1mb6LeAH4inEcSGts=
 github.com/openai/openai-go/v3 v3.84.0 h1:rr29Tge+aOzUVfJcTsz5N70W9EWP35ZUqgv6Z73fumU=
 github.com/openai/openai-go/v3 v3.84.0/go.mod h1:i+lM+NFmWP+Yd+fYKEaPxUINBx+vZtRmY5gaszSfsiQ=
+github.com/openai/openai-go/v3 v3.86.0 h1:OBq62xi3tSI9zMTm++XifNnfHKMpWfPKomS+Butvxyg=
+github.com/openai/openai-go/v3 v3.86.0/go.mod h1:i+lM+NFmWP+Yd+fYKEaPxUINBx+vZtRmY5gaszSfsiQ=
 github.com/segmentio/asm v1.2.1 h1:DTNbBqs57ioxAD4PrArqftgypG4/qNpXoJx8TVXxPR0=
 github.com/segmentio/asm v1.2.1/go.mod h1:BqMnlJP91P8d+4ibuonYZw9mfnzI9HfxselHZr5aAcs=
 github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfvNt0=
